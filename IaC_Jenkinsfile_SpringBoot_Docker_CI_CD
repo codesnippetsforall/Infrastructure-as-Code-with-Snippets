@@ -1,0 +1,266 @@
+pipeline {
+    // Do not reserve a Jenkins agent for the entire pipeline
+    agent none
+
+    environment {
+        // Maven image used for building, testing, and security scanning
+        MAVEN_IMAGE = 'maven:3.9-eclipse-temurin-21-alpine'
+
+        // Lightweight Java runtime image used during deployment
+        RUNTIME_IMAGE = 'eclipse-temurin:21-jre-alpine'
+
+        // Docker container name for the application
+        APP_NAME = 'Hurrayworld-app'
+
+        // Name of the compiled Spring Boot JAR file
+        APP_JAR = 'Hurrayworldwithjava-1.0.0.jar'
+
+        // Application port used inside and outside the container
+        APP_PORT = '8085'
+
+        // Docker host alias used for application health checks
+        DOCKER_HOST_ALIAS = 'docker'
+
+        // Names used to temporarily store pipeline files
+        STASH_APP_JAR = 'app-jar'
+        STASH_TEST_REPORTS = 'test-reports'
+
+        // Jenkins credentials and report configuration
+        EMAIL_TO = credentials('REPORT_TO_ADDRESS_EMAIL_ID')
+        NVD_API_KEY = credentials('NVD_API_KEY')
+        REPORT_NAME = 'Surefire HTML Report'
+    }
+
+    stages {
+
+        stage('Build stage') {
+            // Run this stage inside the Maven Docker image
+            agent {
+                docker {
+                    image "${MAVEN_IMAGE}"
+                    reuseNode true
+                }
+            }
+
+            steps {
+                // Compile and package the Spring Boot application
+                // Tests are skipped because they run in the next stage
+                sh '''
+                    export HOME="${WORKSPACE}"
+                    mkdir -p "${HOME}/.m2"
+                    mvn clean package -DskipTests
+                '''
+
+                // Store the generated JAR for use during deployment
+                stash includes: "target/${APP_JAR}",
+                      name: "${STASH_APP_JAR}"
+            }
+        }
+
+        stage('Dependency Scan') {
+            // Use the Maven container for dependency security scanning
+            agent {
+                docker {
+                    image "${MAVEN_IMAGE}"
+                    reuseNode true
+                }
+            }
+
+            steps {
+                // Scan project dependencies using OWASP Dependency-Check
+                // Fail the build when a vulnerability has CVSS 7 or higher
+                sh '''
+                    export HOME="${WORKSPACE}"
+                    mkdir -p "${HOME}/.m2"
+
+                    mvn -B org.owasp:dependency-check-maven:check \
+                        -DfailBuildOnCVSS=7
+                '''
+            }
+        }
+
+        stage('Test stage') {
+            // Execute tests inside the Maven Docker image
+            agent {
+                docker {
+                    image "${MAVEN_IMAGE}"
+                    reuseNode true
+                }
+            }
+
+            steps {
+                // Run unit tests and generate Surefire reports
+                sh '''
+                    export HOME="${WORKSPACE}"
+                    mkdir -p "${HOME}/.m2"
+                    mkdir -p reports
+
+                    mvn test
+                    mvn -q surefire-report:report-only
+
+                    // Create a simple email-friendly test report
+                    {
+                        echo "<html><body>"
+                        echo "<h2>Test Summary</h2>"
+                        cat target/surefire-reports/*.txt 2>/dev/null \
+                            || echo "No text summary found"
+                        echo "</body></html>"
+                    } > reports/email-report.html
+
+                    // Display generated report directories for troubleshooting
+                    ls -la reports target/surefire-html \
+                        target/surefire-reports || true
+                '''
+            }
+
+            post {
+                always {
+                    // Publish JUnit XML results in Jenkins
+                    junit(
+                        allowEmptyResults: true,
+                        testResults: 'target/surefire-reports/*.xml'
+                    )
+
+                    // Publish the HTML Surefire report
+                    publishHTML(target: [
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/surefire-html',
+                        reportFiles: 'surefire-report.html',
+                        reportName: "${REPORT_NAME}"
+                    ])
+
+                    // Archive reports for later inspection
+                    archiveArtifacts(
+                        artifacts: '''
+                            reports/email-report.html,
+                            target/surefire-html/**,
+                            target/surefire-reports/*.xml
+                        ''',
+                        allowEmptyArchive: true
+                    )
+
+                    // Make the email report available to the final post section
+                    stash(
+                        name: "${STASH_TEST_REPORTS}",
+                        includes: 'reports/email-report.html',
+                        allowEmpty: true
+                    )
+                }
+            }
+        }
+
+        stage('Approval to Deploy stage') {
+            // Use any available Jenkins agent
+            agent any
+
+            steps {
+                // Wait for one minute for manual deployment approval
+                timeout(time: 1, unit: 'MINUTES') {
+                    input(
+                        message: 'Approve to deploy?',
+                        ok: 'Yes, Proceed to Deploy stage!'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy stage') {
+            // Use any available Jenkins agent
+            agent any
+
+            options {
+                // Prevent Jenkins from automatically checking out the source again
+                skipDefaultCheckout(true)
+            }
+
+            steps {
+                // Retrieve the JAR saved during the build stage
+                unstash "${STASH_APP_JAR}"
+
+                sh '''
+                    # Identify and stop containers using the application port
+                    echo "Releasing port ${APP_PORT} if already in use..."
+                    ids=$(docker ps -aq --filter publish=${APP_PORT})
+
+                    if [ -n "$ids" ]; then
+                        docker rm -f $ids
+                    fi
+
+                    # Remove an existing application container if present
+                    docker rm -f "${APP_NAME}" helloworld-app 2>/dev/null || true
+
+                    # Start the Spring Boot application container
+                    docker run -d \
+                        --name "${APP_NAME}" \
+                        -p ${APP_PORT}:${APP_PORT} \
+                        -v "${WORKSPACE}/target/${APP_JAR}:/app/app.jar" \
+                        ${RUNTIME_IMAGE} \
+                        java -jar /app/app.jar
+
+                    # Allow the application time to start
+                    sleep 5
+
+                    # Display application startup logs
+                    docker logs "${APP_NAME}"
+
+                    # Verify the main application endpoint
+                    curl -f --max-time 10 \
+                        "http://${DOCKER_HOST_ALIAS}:${APP_PORT}/"
+
+                    # Verify the health endpoint
+                    curl -f --max-time 10 \
+                        "http://${DOCKER_HOST_ALIAS}:${APP_PORT}/api/health"
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            // Run final reporting tasks on the Jenkins built-in node
+            node('built-in') {
+                script {
+                    // Default message used when no test report is available
+                    def reportHtml = '''
+                        <html>
+                        <body>
+                        <p>No test summary found.</p>
+                        </body>
+                        </html>
+                    '''
+
+                    try {
+                        // Retrieve the generated test report
+                        unstash env.STASH_TEST_REPORTS
+
+                        // Read the report when it exists
+                        if (fileExists('reports/email-report.html')) {
+                            reportHtml = readFile(
+                                'reports/email-report.html'
+                            )
+                        }
+                    } catch (err) {
+                        // Continue gracefully if the report is unavailable
+                        echo "No test reports available: ${err}"
+                    }
+
+                    // Send the final build result by email
+                    mail(
+                        to: env.EMAIL_TO,
+                        subject: "Jenkins ${currentBuild.fullDisplayName}: " +
+                                 "${currentBuild.currentResult}",
+                        mimeType: 'text/html',
+                        body: """
+                            <h2>Hurray</h2>
+                            <p><b>Build:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+                            <p><b>Result:</b> ${currentBuild.currentResult}</p>
+                            ${reportHtml}
+                        """
+                    )
+                }
+            }
+        }
+    }
+}
