@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Jenkins on Ubuntu 24.04 (Noble) EC2 — c7i-flex.large, 30 GiB EBS, ap-south-1.
+  Deploy this stack in the ap-south-1 (Mumbai) region.
+
+Parameters:
+  KeyName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Exact name of an EXISTING EC2 key pair in ap-south-1.
+      Leave blank if you have no key pair (Jenkins UI still works on port 8080;
+      use EC2 Instance Connect from the AWS Console for SSH).
+
+  AllowedSSHCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH (port 22). Restrict to your IP in production.
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: Must be a valid IPv4 CIDR (e.g. 203.0.113.10/32)
+
+  AllowedJenkinsCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to reach Jenkins UI (port 8080). Restrict to your IP in production.
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+    ConstraintDescription: Must be a valid IPv4 CIDR (e.g. 203.0.113.10/32)
+
+  InstanceType:
+    Type: String
+    Default: c7i-flex.large
+    AllowedValues:
+      - c7i-flex.large
+      - c7i.large
+    Description: EC2 instance type (default matches requirement)
+
+  VolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    Description: Root EBS volume size in GiB
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+
+Resources:
+  JenkinsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and Jenkins UI
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref AllowedJenkinsCidr
+          Description: Jenkins web UI
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-jenkins-sg'
+
+  JenkinsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      # Latest Ubuntu 24.04 LTS amd64 (gp3) AMI from Canonical via SSM
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      SecurityGroupIds:
+        - !Ref JenkinsSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSize
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/jenkins-bootstrap.log) 2>&1
+
+          export DEBIAN_FRONTEND=noninteractive
+
+          apt-get update -y
+          apt-get install -y fontconfig openjdk-21-jre
+
+          mkdir -p /etc/apt/keyrings
+          wget -O /etc/apt/keyrings/jenkins-keyring.asc \
+            https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
+
+          echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" \
+            > /etc/apt/sources.list.d/jenkins.list
+
+          apt-get update -y
+          apt-get install -y \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            jenkins
+
+          systemctl enable jenkins
+          systemctl start jenkins
+
+          echo "Jenkins bootstrap completed at $(date -u)"
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-jenkins'
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref JenkinsInstance
+
+  PublicIP:
+    Description: Public IP address
+    Value: !GetAtt JenkinsInstance.PublicIp
+
+  PublicDNS:
+    Description: Public DNS name
+    Value: !GetAtt JenkinsInstance.PublicDnsName
+
+  JenkinsURL:
+    Description: Jenkins web UI URL (available after bootstrap finishes; may take a few minutes)
+    Value: !Sub 'http://${JenkinsInstance.PublicIp}:8080'
+
+  SSHHint:
+    Description: SSH access hint
+    Value: !If
+      - HasKeyName
+      - !Sub 'ssh -i <your-key.pem> ubuntu@${JenkinsInstance.PublicIp}'
+      - !Sub 'No key pair set. Use EC2 Console → Connect → EC2 Instance Connect as user ubuntu on ${JenkinsInstance.PublicIp}'
+
+  InitialAdminPasswordHint:
+    Description: How to read the Jenkins initial admin password
+    Value: 'sudo cat /var/lib/jenkins/secrets/initialAdminPassword'
