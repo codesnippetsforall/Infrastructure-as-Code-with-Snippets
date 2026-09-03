@@ -1,0 +1,11 @@
+# This Dockerfile creates a minimal container that runs Apache httpd on Alpine Linux and serves a single static HTML page. 
+# It starts from the lightweight httpd:alpine base image, then copies your index.html into Apache’s default document root so the page is immediately accessible over HTTP when the container runs.
+
+# Use the official Apache httpd image based on Alpine Linux (small, secure base)
+FROM httpd:alpine
+
+# Copy your static HTML file into httpd's default web root so it is served at /
+COPY index.html /usr/local/apache2/htdocs/index.html
+
+# Default httpd Expose PORT 80, below line is OPTIONAL
+EXPOSE 80
