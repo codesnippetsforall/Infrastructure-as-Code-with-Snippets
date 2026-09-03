@@ -1,8 +1,0 @@
-# Step 1: Define the foundational execution environment
-FROM eclipse-temurin:17-jre-alpine
-
-# Step 2: Inject the compiled Spring Boot application artifact
-COPY target/*.jar app.jar
-
-# Step 3: Set the immutable operational command for the container
-ENTRYPOINT ["java", "-jar", "/app.jar"]

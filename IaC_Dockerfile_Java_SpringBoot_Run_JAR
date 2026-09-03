@@ -1,0 +1,14 @@
+# This Dockerfile defines a minimal, production-oriented image for running a Spring Boot application. 
+# It starts from a lightweight Java 17 JRE base (Eclipse Temurin on Alpine), copies the built Spring Boot JAR into the image, and configures the container to launch the application by running java -jar /app.jar when started.
+
+# Step 1: Define the foundational execution environment
+# Use Eclipse Temurin Java 17 JRE on Alpine as a small, secure runtime base
+FROM eclipse-temurin:17-jre-alpine
+
+# Step 2: Inject the compiled Spring Boot application artifact
+# Copy the built Spring Boot JAR from the host into the image as /app.jar
+COPY target/*.jar app.jar
+
+# Step 3: Set the immutable operational command for the container
+# When the container starts, run the Spring Boot app using java -jar
+ENTRYPOINT ["java", "-jar", "/app.jar"]
