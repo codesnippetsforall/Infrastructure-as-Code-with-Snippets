@@ -1,0 +1,11 @@
+# This Dockerfile creates a minimal Nginx-based container that serves a single static HTML page. 
+# It uses the lightweight nginx:alpine image, copies index.html into Nginx’s default document root (/usr/share/nginx/html), and optionally exposes port 80 so the page is accessible over HTTP when the container runs.
+
+# Use the official Nginx image based on Alpine Linux (small, secure base)
+FROM nginx:alpine
+
+# Copy your static HTML file into Nginx's default web root so it is served at /
+COPY index.html /usr/share/nginx/html/index.html
+
+# Expose port 80 (optional but common for clarity)
+EXPOSE 80
